@@ -8,6 +8,7 @@ import Dashboard from './pages/Dashboard'
 import EquipmentPage from './pages/EquipmentPage'
 import Shipments from './pages/Shipments'
 import InRepair from './pages/InRepair'
+import Loans from './pages/Loans'
 import Login from './pages/Login'
 
 export default function App() {
@@ -32,6 +33,7 @@ export default function App() {
               <Route path="desktop_scanners" element={<EquipmentPage table="desktop_scanners" />} />
               <Route path="tablets" element={<EquipmentPage table="tablets" />} />
               <Route path="shipments" element={<Shipments />} />
+              <Route path="loans" element={<Loans />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

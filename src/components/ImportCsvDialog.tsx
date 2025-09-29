@@ -1,310 +1,344 @@
 import * as React from 'react'
 import {
-  Box, Button, Dialog, DialogTitle, DialogContent, DialogActions,
-  Stack, Typography, Alert, Paper, LinearProgress
+  Dialog, DialogTitle, DialogContent, DialogActions,
+  Button, Box, Typography, Paper, Stack, MenuItem, TextField,
+  Table, TableHead, TableRow, TableCell, TableBody, Chip, LinearProgress, Alert
 } from '@mui/material'
-import { EquipmentItem, EquipmentTableName } from '../types'
-import { STATUS_LABELS } from '../constants'
-import { insertItems, findExistingSerials } from '../offline/adapter'
-
-type ParsedRow = {
-  internal_id: string
-  model: string
-  serial_number: string
-  status?: 'on_stock' | 'in_repair'
-  __line: number
-}
+import Papa from 'papaparse'
+import { supabase } from '../lib/supabase'
+import { EquipmentTableName } from '../types'
+import { EQUIPMENT_TYPES } from '../constants'
 
 type Props = {
   open: boolean
   onClose: () => void
-  table: EquipmentTableName
-  onImported: () => void
+  onImported?: () => void
+  /** Необязательный предустановленный тип (для вызовов вроде <ImportCsvDialog table={table} />) */
+  table?: EquipmentTableName
 }
 
-function detectDelimiter(headerLine: string) {
-  const comma = (headerLine.match(/,/g) || []).length
-  const semicolon = (headerLine.match(/;/g) || []).length
-  return semicolon > comma ? ';' : ','
+type CsvRow = {
+  internal_id?: string
+  model?: string
+  serial_number?: string
+  status?: 'on_stock' | 'in_repair' | string
 }
 
-function splitCsvLine(line: string, delimiter: string): string[] {
-  const out: string[] = []
-  let cur = '', inQuotes = false
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]
-    if (ch === '"') {
-      if (inQuotes && i + 1 < line.length && line[i + 1] === '"') { cur += '"'; i++ } else { inQuotes = !inQuotes }
-    } else if (ch === delimiter && !inQuotes) { out.push(cur); cur = '' }
-    else { cur += ch }
-  }
-  out.push(cur)
-  return out.map(s => s.trim())
+type RowWithMeta = CsvRow & {
+  __row: number
+  __errors: string[]
 }
 
-function parseCsv(text: string): { headers: string[], rows: string[][] } {
-  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(l => l.length > 0)
-  if (lines.length === 0) return { headers: [], rows: [] }
-  const delimiter = detectDelimiter(lines[0])
-  const headers = splitCsvLine(lines[0], delimiter).map(h => h.trim())
-  const rows: string[][] = []
-  for (let i = 1; i < lines.length; i++) {
-    const arr = splitCsvLine(lines[i], delimiter)
-    if (arr.every(c => c === '')) continue
-    rows.push(arr)
-  }
-  return { headers, rows }
-}
+const TABLE_OPTIONS: { value: EquipmentTableName; label: string }[] = [
+  { value: 'tsd', label: EQUIPMENT_TYPES.tsd.title },
+  { value: 'finger_scanners', label: EQUIPMENT_TYPES.finger_scanners.title },
+  { value: 'desktop_scanners', label: EQUIPMENT_TYPES.desktop_scanners.title },
+  { value: 'tablets', label: EQUIPMENT_TYPES.tablets.title },
+]
 
-async function readFileAsTextSmart(file: File): Promise<string> {
-  const utf8 = await new Promise<string>((resolve, reject) => {
-    const r = new FileReader()
-    r.onload = () => resolve(String(r.result || ''))
-    r.onerror = () => reject(r.error)
-    r.readAsText(file)
-  })
-  if (utf8.includes('\uFFFD')) {
-    try {
-      const win1251 = await new Promise<string>((resolve, reject) => {
-        const r = new FileReader()
-        r.readAsText(file, 'windows-1251')
-        r.onload = () => resolve(String(r.result || ''))
-        r.onerror = () => reject(r.error)
-      })
-      return win1251
-    } catch {}
-  }
-  return utf8
-}
+const REQUIRED_COLS = ['model', 'serial_number'] as const
+const ACCEPT_STATUSES = new Set(['on_stock', 'in_repair'])
 
-function toTemplateCsv(): string {
-  return [
-    'internal_id,model,serial_number,status',
-    'TSD-001,Newland MT90,ABC123456,on_stock',
-    'TSD-002,Newland MT90,ABC123457,on_stock'
-  ].join('\r\n')
-}
+type LastBatch = { table: EquipmentTableName; ids: number[]; ts: number }
+const LAST_BATCH_KEY = 'lastImportBatch/v1'
 
-export default function ImportCsvDialog({ open, onClose, table, onImported }: Props) {
-  const [fileName, setFileName] = React.useState<string>('')
-  const [parsed, setParsed] = React.useState<ParsedRow[]>([])
-  const [errors, setErrors] = React.useState<string[]>([])
-  const [loading, setLoading] = React.useState(false)
-  const [skipDuplicates, setSkipDuplicates] = React.useState(true)
-  const [dupSerials, setDupSerials] = React.useState<string[]>([])
-  const [summary, setSummary] = React.useState<string>('')
+export default function ImportCsvDialog({ open, onClose, onImported, table: tableProp }: Props) {
+  // локальный стейт типа таблицы; если проп передан — предустанавливаем
+  const [table, setTable] = React.useState<EquipmentTableName>(tableProp ?? 'tsd')
 
-  const resetState = React.useCallback(() => {
-    setFileName('')
-    setParsed([])
-    setErrors([])
-    setLoading(false)
-    setSkipDuplicates(true)
-    setDupSerials([])
-    setSummary('')
-  }, [])
-
-  React.useEffect(() => { if (!open) resetState() }, [open, resetState])
-
-  const onDrop = React.useCallback(async (f: File) => {
-    resetState(); setFileName(f.name); setLoading(true)
-    try {
-      const text = await readFileAsTextSmart(f)
-      const { headers, rows } = parseCsv(text)
-      const headersLC = headers.map(h => h.trim().toLowerCase())
-      const required = ['internal_id', 'model', 'serial_number']
-      const missing = required.filter(r => !headersLC.includes(r))
-      if (missing.length) {
-        setErrors([`Не найдены колонки: ${missing.join(', ')}`, 'Ожидаемые: internal_id, model, serial_number[, status]'])
-        setLoading(false)
-        return
-      }
-
-      const idx = {
-        internal_id: headersLC.indexOf('internal_id'),
-        model: headersLC.indexOf('model'),
-        serial_number: headersLC.indexOf('serial_number'),
-        status: headersLC.indexOf('status'),
-      }
-
-      const list: ParsedRow[] = []
-      const errs: string[] = []
-      rows.forEach((r, i) => {
-        const line = i + 2
-        const rec: ParsedRow = {
-          internal_id: r[idx.internal_id]?.trim() || '',
-          model: r[idx.model]?.trim() || '',
-          serial_number: r[idx.serial_number]?.trim() || '',
-          status: idx.status >= 0 ? (r[idx.status]?.trim() as any) : 'on_stock',
-          __line: line,
-        }
-        if (!rec.internal_id || !rec.model || !rec.serial_number) {
-          errs.push(`Строка ${line}: пустые значения`)
-        } else if (rec.status && rec.status !== 'on_stock' && rec.status !== 'in_repair') {
-          errs.push(`Строка ${line}: недопустимый статус "${rec.status}"`)
-        } else {
-          list.push(rec)
-        }
-      })
-
-      if (list.length === 0) {
-        setErrors(errs.length ? errs : ['Нет валидных строк'])
-        setLoading(false)
-        return
-      }
-
-      const sers = Array.from(new Set(list.map(x => x.serial_number)))
-      const existing = await findExistingSerials(table, sers)
-      setDupSerials(existing)
-
-      setParsed(list)
-      setErrors(errs)
-    } catch (e: any) {
-      setErrors(['Ошибка чтения/разбора CSV: ' + (e?.message || String(e))])
-    } finally {
-      setLoading(false)
-    }
-  }, [resetState, table])
-
-  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]; if (f) onDrop(f)
-  }
-
-  const handleImport = async () => {
-    if (parsed.length === 0) return
-    setLoading(true); setSummary('')
-    try {
-      const toInsert = parsed
-        .filter(r => (skipDuplicates ? !dupSerials.includes(r.serial_number) : true))
-        .map(r => ({
-          internal_id: r.internal_id,
-          model: r.model,
-          serial_number: r.serial_number,
-          status: r.status || 'on_stock'
-        } as Omit<EquipmentItem, 'id'>))
-
-      if (toInsert.length === 0) {
-        setSummary('Все строки — дубликаты. Нечего импортировать.')
-        setLoading(false)
-        return
-      }
-
-      await insertItems(table, toInsert)
-      const skipped = parsed.length - toInsert.length
-      setSummary(`Импорт завершён. Добавлено: ${toInsert.length}. Пропущено: ${skipped}.`)
-      onImported()
-    } catch (e: any) {
-      setErrors(['Сбой импорта: ' + (e?.message || String(e))])
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const dropRef = React.useRef<HTMLDivElement>(null)
+  // при каждом открытии диалога синхронизируемся с пропом, если он задан
   React.useEffect(() => {
-    const el = dropRef.current; if (!el) return
-    const onDragOver = (e: DragEvent) => { e.preventDefault(); e.stopPropagation() }
-    const onDropEvt = (e: DragEvent) => {
-      e.preventDefault(); e.stopPropagation()
-      const f = e.dataTransfer?.files?.[0]; if (f) onDrop(f)
-    }
-    el.addEventListener('dragover', onDragOver)
-    el.addEventListener('drop', onDropEvt)
-    return () => {
-      el.removeEventListener('dragover', onDragOver)
-      el.removeEventListener('drop', onDropEvt)
-    }
-  }, [onDrop])
+    if (open && tableProp) setTable(tableProp)
+  }, [open, tableProp])
 
-  const previewCount = Math.min(5, parsed.length)
-  const preview = parsed.slice(0, previewCount)
+  const [fileName, setFileName] = React.useState<string>('')
+  const [rows, setRows] = React.useState<RowWithMeta[]>([])
+  const [parsing, setParsing] = React.useState(false)
+  const [checking, setChecking] = React.useState(false)
+  const [importing, setImporting] = React.useState(false)
+  const [message, setMessage] = React.useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
+
+  const inputRef = React.useRef<HTMLInputElement | null>(null)
+
+  const lastBatch = React.useMemo<LastBatch | null>(() => {
+    try { return JSON.parse(localStorage.getItem(LAST_BATCH_KEY) || 'null') } catch { return null }
+  }, [open])
+
+  const hasErrors = rows.some(r => r.__errors.length > 0)
+  const validRows = rows.filter(r => r.__errors.length === 0)
+
+  const resetState = () => {
+    setFileName('')
+    setRows([])
+    setParsing(false)
+    setChecking(false)
+    setImporting(false)
+    setMessage(null)
+  }
+
+  const close = () => {
+    resetState()
+    onClose()
+  }
+
+  function normalizeHeader(h: string) {
+    return h.trim().toLowerCase().replace(/\s+/g, '_')
+  }
+
+  function pick<T extends object>(obj: T, keys: string[]) {
+    const out: any = {}
+    for (const k of keys) out[k] = (obj as any)[k]
+    return out
+  }
+
+  const handleFile = (file: File) => {
+    setParsing(true)
+    setMessage(null)
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      transformHeader: normalizeHeader,
+      complete: async (res) => {
+        setParsing(false)
+        if (res.errors?.length) {
+          setMessage({ type: 'error', text: 'Ошибка разбора CSV: проверьте формат и разделители' })
+          return
+        }
+        const raw: CsvRow[] = (res.data as any[]).map(d => pick(d, ['internal_id', 'model', 'serial_number', 'status']))
+
+        // базовая валидация + нормализация
+        const withMeta: RowWithMeta[] = raw.map((r, idx) => {
+          const errs: string[] = []
+          for (const col of REQUIRED_COLS) {
+            if (!String((r as any)[col] ?? '').trim()) errs.push(`Пустое поле ${col}`)
+          }
+          const status = String(r.status ?? 'on_stock').trim().toLowerCase()
+          if (status && !ACCEPT_STATUSES.has(status)) errs.push(`Некорректный status: ${r.status}`)
+          return {
+            __row: idx + 2,
+            __errors: errs,
+            internal_id: String(r.internal_id ?? '').trim() || undefined,
+            model: String(r.model ?? '').trim() || undefined,
+            serial_number: String(r.serial_number ?? '').trim() || undefined,
+            status: (status as any) || 'on_stock'
+          }
+        })
+
+        // дубликаты внутри файла по serial_number
+        const seen = new Map<string, number>()
+        for (const r of withMeta) {
+          const sn = (r.serial_number || '').toUpperCase()
+          if (!sn) continue
+          if (seen.has(sn)) {
+            r.__errors.push(`Дубликат серийника в файле (строка ${seen.get(sn)})`)
+          } else {
+            seen.set(sn, r.__row)
+          }
+        }
+
+        setRows(withMeta)
+        await checkDbDuplicates(withMeta)
+      }
+    })
+  }
+
+  async function checkDbDuplicates(list: RowWithMeta[]) {
+    const serials = Array.from(new Set(list.map(r => (r.serial_number || '').trim()).filter(Boolean)))
+    if (serials.length === 0) return
+    setChecking(true)
+    try {
+      const batchSize = 500
+      const existing = new Set<string>()
+      for (let i = 0; i < serials.length; i += batchSize) {
+        const chunk = serials.slice(i, i + batchSize)
+        const { data, error } = await supabase
+          .from(table)
+          .select('serial_number')
+          .in('serial_number', chunk)
+        if (error) throw new Error(error.message)
+        for (const d of (data || [])) existing.add(String(d.serial_number).trim().toUpperCase())
+      }
+      setRows(prev => prev.map(r => {
+        const sn = (r.serial_number || '').trim().toUpperCase()
+        if (sn && existing.has(sn)) {
+          return { ...r, __errors: [...r.__errors, 'Серийник уже существует в базе'] }
+        }
+        return r
+      }))
+    } catch (e: any) {
+      setMessage({ type: 'error', text: 'Ошибка проверки в БД: ' + (e.message || e) })
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  const onSelectFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]
+    if (f) {
+      setFileName(f.name)
+      handleFile(f)
+    }
+  }
+
+  const importValid = async () => {
+    if (validRows.length === 0) {
+      setMessage({ type: 'error', text: 'Нет валидных строк для импорта' })
+      return
+    }
+    setImporting(true)
+    setMessage(null)
+    try {
+      const batchSize = 500
+      const insertedIds: number[] = []
+      for (let i = 0; i < validRows.length; i += batchSize) {
+        const chunk = validRows.slice(i, i + batchSize)
+        const payload = chunk.map(r => ({
+          internal_id: r.internal_id || null,
+          model: r.model!,
+          serial_number: r.serial_number!,
+          status: (r.status === 'in_repair' ? 'in_repair' : 'on_stock') as 'on_stock'|'in_repair'
+        }))
+        const { data, error } = await supabase
+          .from(table)
+          .insert(payload)
+          .select('id')
+        if (error) throw new Error(error.message)
+        for (const d of (data || [])) insertedIds.push(Number(d.id))
+      }
+
+      const batch: LastBatch = { table, ids: insertedIds, ts: Date.now() }
+      localStorage.setItem(LAST_BATCH_KEY, JSON.stringify(batch))
+
+      setMessage({ type: 'success', text: `Импортировано: ${insertedIds.length} из ${validRows.length}` })
+      if (onImported) onImported()
+    } catch (e: any) {
+      setMessage({ type: 'error', text: 'Ошибка импорта: ' + (e.message || e) })
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const rollbackLast = async () => {
+    const lb = lastBatch
+    if (!lb) {
+      setMessage({ type: 'info', text: 'Нет данных для отката' })
+      return
+    }
+    if (!window.confirm(`Удалить ${lb.ids.length} записей (${EQUIPMENT_TYPES[lb.table].title}) из последнего импорта?`)) return
+    setImporting(true)
+    setMessage(null)
+    try {
+      if (lb.ids.length > 0) {
+        const batchSize = 500
+        for (let i = 0; i < lb.ids.length; i += batchSize) {
+          const chunk = lb.ids.slice(i, i + batchSize)
+          const { error } = await supabase.from(lb.table).delete().in('id', chunk)
+          if (error) throw new Error(error.message)
+        }
+      }
+      localStorage.removeItem(LAST_BATCH_KEY)
+      setMessage({ type: 'success', text: 'Откат выполнен' })
+      if (onImported) onImported()
+    } catch (e: any) {
+      setMessage({ type: 'error', text: 'Ошибка отката: ' + (e.message || e) })
+    } finally {
+      setImporting(false)
+    }
+  }
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
-      <DialogTitle>Импорт CSV — {table.toUpperCase()}</DialogTitle>
+    <Dialog open={open} onClose={close} maxWidth="lg" fullWidth>
+      <DialogTitle>Импорт CSV</DialogTitle>
       <DialogContent dividers>
-        <Stack spacing={2}>
-          <Stack direction="row" spacing={1}>
-            <Button variant="outlined" component="label">
-              Выбрать CSV
-              <input type="file" hidden accept=".csv,text/csv" onChange={handleFileInput} />
-            </Button>
-            <Button variant="text" onClick={() => {
-              const blob = new Blob([toTemplateCsv()], { type: 'text/csv;charset=utf-8' })
-              const url = URL.createObjectURL(blob)
-              const a = document.createElement('a')
-              a.href = url; a.download = `template_${table}.csv`
-              document.body.appendChild(a); a.click(); a.remove()
-              URL.revokeObjectURL(url)
-            }}>Скачать шаблон</Button>
-          </Stack>
-
-          <Box
-            ref={dropRef}
-            sx={{ p: 2, border: '2px dashed', borderColor: 'divider', borderRadius: 2, textAlign: 'center', bgcolor: 'background.paper' }}
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="center" mb={2}>
+          <TextField
+            select
+            size="small"
+            label="Тип оборудования"
+            value={table}
+            onChange={(e) => setTable(e.target.value as EquipmentTableName)}
+            sx={{ minWidth: 260 }}
           >
-            <Typography variant="body2" color="text.secondary">
-              Перетащите CSV или выберите файл. Заголовки: <b>internal_id, model, serial_number[, status]</b>.
-            </Typography>
-            {fileName && <Typography mt={1}>Файл: <b>{fileName}</b></Typography>}
-          </Box>
+            {TABLE_OPTIONS.map(o => (
+              <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>
+            ))}
+          </TextField>
 
-          {loading && <LinearProgress />}
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".csv,text/csv"
+            hidden
+            onChange={onSelectFile}
+          />
+          <Button variant="outlined" onClick={() => inputRef.current?.click()}>
+            Выбрать CSV
+          </Button>
+          <Typography variant="body2" color="text.secondary">{fileName || 'Файл не выбран'}</Typography>
 
-          {errors.length > 0 && (
-            <Alert severity="error">
-              <Stack>{errors.map((e, i) => <span key={i}>{e}</span>)}</Stack>
-            </Alert>
-          )}
-
-          {parsed.length > 0 && (
-            <Paper variant="outlined" sx={{ p: 2 }}>
-              <Typography variant="subtitle2" gutterBottom>
-                Предпросмотр ({preview.length} из {parsed.length}):
-              </Typography>
-              <Box component="table" sx={{ width: '100%', borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr>
-                    <th style={{ textAlign: 'left', padding: 6 }}>#</th>
-                    <th style={{ textAlign: 'left', padding: 6 }}>Внутр. ID</th>
-                    <th style={{ textAlign: 'left', padding: 6 }}>Модель</th>
-                    <th style={{ textAlign: 'left', padding: 6 }}>Серийный номер</th>
-                    <th style={{ textAlign: 'left', padding: 6 }}>Статус</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {preview.map((r, i) => (
-                    <tr key={i}>
-                      <td style={{ padding: 6 }}>{r.__line}</td>
-                      <td style={{ padding: 6 }}>{r.internal_id}</td>
-                      <td style={{ padding: 6 }}>{r.model}</td>
-                      <td style={{ padding: 6 }}>{r.serial_number}</td>
-                      <td style={{ padding: 6 }}>{STATUS_LABELS[r.status || 'on_stock']}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </Box>
-              {dupSerials.length > 0 && (
-                <Alert severity="warning" sx={{ mt: 2 }}>
-                  Найдено дубликатов SN в БД/кеше: <b>{dupSerials.length}</b>. Они будут {skipDuplicates ? 'пропущены' : 'импортированы'}.
-                  <Box mt={1}>
-                    <Button size="small" variant="outlined" onClick={() => setSkipDuplicates(s => !s)}>
-                      {skipDuplicates ? 'Не пропускать' : 'Пропускать'} дубликаты
-                    </Button>
-                  </Box>
-                </Alert>
-              )}
-            </Paper>
-          )}
-
-          {summary && <Alert severity="success">{summary}</Alert>}
+          <Box flexGrow={1} />
+          <Stack direction="row" spacing={1}>
+            <Button variant="outlined" color="error" onClick={rollbackLast} disabled={importing}>
+              Откатить последний импорт
+            </Button>
+            <Button variant="contained" onClick={importValid} disabled={importing || parsing || checking || validRows.length === 0}>
+              Импортировать валидные ({validRows.length})
+            </Button>
+          </Stack>
         </Stack>
+
+        <Paper variant="outlined" sx={{ p: 2 }}>
+          <Typography variant="subtitle2" gutterBottom>Требуемые колонки: model, serial_number. Допустимые: internal_id, status (on_stock | in_repair)</Typography>
+          {(parsing || checking || importing) && <LinearProgress sx={{ mb: 2 }} />}
+
+          {message && (
+            <Alert severity={message.type} sx={{ mb: 2 }}>{message.text}</Alert>
+          )}
+
+          <Box sx={{ maxHeight: 380, overflow: 'auto', borderRadius: 1, border: '1px solid #eee' }}>
+            <Table size="small" stickyHeader>
+              <TableHead>
+                <TableRow>
+                  <TableCell>#</TableCell>
+                  <TableCell>internal_id</TableCell>
+                  <TableCell>model</TableCell>
+                  <TableCell>serial_number</TableCell>
+                  <TableCell>status</TableCell>
+                  <TableCell>Ошибки</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {rows.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={6}>
+                      <Typography color="text.secondary">Загрузите CSV для предпросмотра</Typography>
+                    </TableCell>
+                  </TableRow>
+                ) : rows.map((r, idx) => (
+                  <TableRow key={idx} selected={r.__errors.length > 0}>
+                    <TableCell>{r.__row}</TableCell>
+                    <TableCell>{r.internal_id || <span style={{ color:'#999' }}>—</span>}</TableCell>
+                    <TableCell>{r.model || <span style={{ color:'#999' }}>—</span>}</TableCell>
+                    <TableCell>{r.serial_number || <span style={{ color:'#999' }}>—</span>}</TableCell>
+                    <TableCell>{r.status || 'on_stock'}</TableCell>
+                    <TableCell>
+                      {r.__errors.length === 0 ? (
+                        <Chip size="small" color="success" label="OK" />
+                      ) : (
+                        <Stack direction="row" spacing={0.5} flexWrap="wrap">
+                          {r.__errors.map((e, i) => <Chip key={i} size="small" color="error" variant="outlined" label={e} />)}
+                        </Stack>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </Box>
+        </Paper>
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose}>Закрыть</Button>
-        <Button onClick={handleImport} variant="contained" disabled={parsed.length === 0 || loading}>
-          Импортировать {parsed.length > 0 ? `(${parsed.length})` : ''}
-        </Button>
+        <Button onClick={close}>Закрыть</Button>
       </DialogActions>
     </Dialog>
   )

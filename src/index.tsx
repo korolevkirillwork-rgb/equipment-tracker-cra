@@ -3,18 +3,21 @@ import ReactDOM from 'react-dom/client'
 import App from './App'
 import { CssBaseline, ThemeProvider } from '@mui/material'
 import { theme } from './theme'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { queryClient } from './lib/queryClient'
 
-const container = document.getElementById('root') as HTMLElement
-const root = ReactDOM.createRoot(container)
-
+const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement)
 root.render(
   <React.StrictMode>
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <App />
-    </ThemeProvider>
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <App />
+      </ThemeProvider>
+    </QueryClientProvider>
   </React.StrictMode>
 )
+
 
 // SERVICE WORKER: prod — регистрируем; dev — удаляем и чистим кэши
 if ('serviceWorker' in navigator) {

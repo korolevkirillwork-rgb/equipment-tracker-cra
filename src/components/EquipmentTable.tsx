@@ -110,15 +110,16 @@ export default function EquipmentTable({ table }: { table: EquipmentTableName })
     }
   }
 
-  const handlePrintLabelsA4 = async () => {
+  // было: handlePrintLabelsA4
+  const handlePrintLabels100x70 = async () => {
     if (selection.length === 0) return
     const ids = new Set(selection.map(Number))
     const items = rows.filter(r => ids.has(r.id))
     try {
-      await generateLabelsPDF({ items, title, cols: 3, rows: 8, qrField: 'composed', tableName: table })
-      setNotif({ open: true, msg: 'PDF с этикетками (A4) сохранён', sev: 'success' })
+      await generateLabelsPDF({ items, title, qrField: 'serial_number', tableName: table })
+      setNotif({ open: true, msg: 'PDF 100×70 сохранён', sev: 'success' })
     } catch (e: any) {
-      setNotif({ open: true, msg: e?.message || 'Не удалось сформировать PDF', sev: 'error' })
+      setNotif({ open: true, msg: e?.message || 'Не удалось сформировать PDF 100×70', sev: 'error' })
     }
   }
 
@@ -154,7 +155,7 @@ export default function EquipmentTable({ table }: { table: EquipmentTableName })
       <Stack direction="row" spacing={1} mb={1} flexWrap="wrap">
         <Button variant="contained" onClick={() => setAddOpen(true)}>Добавить</Button>
         <Button variant="outlined" onClick={() => setImportOpen(true)}>Импорт CSV</Button>
-        <Button variant="outlined" onClick={handlePrintLabelsA4} disabled={selection.length === 0}>Печать A4</Button>
+        <Button variant="outlined" onClick={handlePrintLabels100x70} disabled={selection.length === 0}>Печать 100×70</Button>
         <Button variant="outlined" onClick={handlePrintLabels50} disabled={selection.length === 0}>Печать 50×50</Button>
         <Button variant="outlined" color="error" onClick={handleDelete} disabled={selection.length === 0}>Удалить</Button>
         <Button variant="outlined" onClick={() => setShipOpen(true)} disabled={selection.length === 0}>Отгрузить</Button>

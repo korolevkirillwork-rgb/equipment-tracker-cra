@@ -7,6 +7,7 @@ import TabletIcon from '@mui/icons-material/TabletMac'
 import LocalShippingIcon from '@mui/icons-material/LocalShipping'
 import WarehouseIcon from '@mui/icons-material/Warehouse'
 import BuildIcon from '@mui/icons-material/Build'
+import AssignmentIndIcon from '@mui/icons-material/AssignmentInd'
 import { Link as RouterLink, useLocation } from 'react-router-dom'
 
 export const drawerWidth = 224
@@ -28,13 +29,11 @@ export default function Sidebar() {
     <Box role="navigation" sx={{ width: drawerWidth }}>
       <Toolbar />
       <Divider />
-      {/* Главная */}
       <List dense>
         <Item to="/" icon={<DashboardIcon />} label="Главная" />
       </List>
 
       <Divider />
-      {/* Типы оборудования */}
       <List dense>
         <Item to="/tsd" icon={<WarehouseIcon />} label="ТСД" />
         <Item to="/finger_scanners" icon={<QrCodeScannerIcon />} label="Напалечные" />
@@ -43,10 +42,10 @@ export default function Sidebar() {
       </List>
 
       <Divider />
-      {/* Логистика/ремонт */}
       <List dense>
         <Item to="/shipments" icon={<LocalShippingIcon />} label="Отгрузки" />
         <Item to="/in_repair" icon={<BuildIcon />} label="В ремонте" />
+        <Item to="/loans" icon={<AssignmentIndIcon />} label="Выдача/сдача" />
       </List>
     </Box>
   )

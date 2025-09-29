@@ -3,7 +3,6 @@ import autoTable from 'jspdf-autotable'
 import QRCode from 'qrcode'
 import { EquipmentItem, EquipmentTableName } from '../types'
 
-// Шрифты и лого
 import dejavuRegularUrl from '../assets/fonts/DejaVuSans.ttf'
 import dejavuBoldUrl    from '../assets/fonts/DejaVuSans-Bold.ttf'
 import notoRegularUrl   from '../assets/fonts/NotoSans-Regular.ttf'
@@ -15,8 +14,11 @@ async function urlToBase64(url: string): Promise<string | null> {
     if (!res.ok) return null
     const buf = await res.arrayBuffer()
     const bytes = new Uint8Array(buf)
+    const chunk = 0x8000
     let binary = ''
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+    }
     return btoa(binary)
   } catch { return null }
 }
@@ -44,35 +46,42 @@ function detectImageFormat(dataUrl: string): 'PNG' | 'JPEG' {
 let fontReady = false
 let activeFamily: 'DejaVuSans' | 'NotoSans' = 'DejaVuSans'
 
-async function registerFamily(doc: jsPDF, family: 'DejaVuSans' | 'NotoSans', regularUrl: string, boldUrl: string) {
+async function registerFamily(
+  doc: jsPDF,
+  family: 'DejaVuSans' | 'NotoSans',
+  regularUrl: string,
+  boldUrl: string
+) {
   const regularB64 = await urlToBase64(regularUrl)
   const boldB64    = await urlToBase64(boldUrl)
   if (!regularB64) return false
 
   const regularVfsName = `${family}-Regular.ttf`
   doc.addFileToVFS(regularVfsName, regularB64)
-  doc.addFont(regularVfsName, family, 'normal')
+  doc.addFont(regularVfsName, family, 'normal', 'Identity-H')
 
   if (boldB64) {
     const boldVfsName = `${family}-Bold.ttf`
     doc.addFileToVFS(boldVfsName, boldB64)
-    doc.addFont(boldVfsName, family, 'bold')
+    doc.addFont(boldVfsName, family, 'bold', 'Identity-H')
   } else {
-    doc.addFont(regularVfsName, family, 'bold')
+    doc.addFont(regularVfsName, family, 'bold', 'Identity-H')
   }
   return true
 }
 
 async function ensureFonts(doc: jsPDF) {
-  if (fontReady) return
+  if (fontReady) { doc.setFont(activeFamily, 'normal'); return }
   if (await registerFamily(doc, 'DejaVuSans', dejavuRegularUrl, dejavuBoldUrl)) {
     activeFamily = 'DejaVuSans'
     fontReady = true
+    doc.setFont(activeFamily, 'normal')
     return
   }
   if (await registerFamily(doc, 'NotoSans', notoRegularUrl, notoBoldUrl)) {
     activeFamily = 'NotoSans'
     fontReady = true
+    doc.setFont(activeFamily, 'normal')
     return
   }
   throw new Error('Не удалось загрузить шрифты (regular/bold)')
@@ -158,11 +167,11 @@ export async function generateShipmentPDF(opts: {
   doc.text(`Тип: ${opts.equipmentTitle}`, titleX, 76)
   doc.text(`Позиции: ${opts.items.length}`, titleX + 180, 76)
 
-  const tableStartY = headerH + 20
+  const tableStartY = 100
   autoTable(doc, {
     startY: tableStartY,
-    styles:       { font: activeFamily, fontSize: 10, cellPadding: 6, valign: 'middle' },
-    headStyles:   { font: activeFamily, fontStyle: 'bold', fillColor: [25,118,210] as any, textColor: 255 },
+    styles:       { font: activeFamily, fontStyle: 'normal', fontSize: 10, cellPadding: 6, valign: 'middle' },
+    headStyles:   { font: activeFamily, fontStyle: 'bold',   fillColor: [25,118,210] as any, textColor: 255 },
     bodyStyles:   { font: activeFamily, fontStyle: 'normal' },
     theme: 'striped',
     alternateRowStyles: { fillColor: [245, 248, 255] },
@@ -170,6 +179,7 @@ export async function generateShipmentPDF(opts: {
     head: [['#', 'Внутр. ID', 'Модель', 'Серийный номер']],
     body: opts.items.map((i, idx) => [String(idx + 1), i.internal_id, i.model, i.serial_number])
   })
+  doc.setFont(activeFamily, 'normal')
 
   const anyDoc = doc as any
   const endY = anyDoc.lastAutoTable?.finalY ?? (tableStartY + 20)
@@ -180,8 +190,7 @@ export async function generateShipmentPDF(opts: {
   doc.text('Итоги:', marginX, endY + 30)
   doc.setFontSize(11)
   doc.text(`Всего позиций: ${opts.items.length}`, marginX, endY + 50)
-  doc.text('Подпись отправителя: ____________________', marginX, endY + 90)
-
+  doc.text('Подпись|ФИО отправителя _______________________________________________________________', marginX, endY + 90)
   const stamp = new Date().toLocaleString()
   doc.setFontSize(9)
   doc.setTextColor(90, 90, 90)
@@ -191,99 +200,72 @@ export async function generateShipmentPDF(opts: {
   doc.save(`shipment_${opts.shipmentNumber}.pdf`)
 }
 
-// ======================== A4 LABELS (3×8) ========================
 type LabelsOptions = {
   title?: string
-  cols?: number
-  rows?: number
+  cols?: number // для совместимости, не используется
+  rows?: number // для совместимости, не используется
   qrField?: 'serial_number' | 'internal_id' | 'id' | 'composed'
   tableName?: EquipmentTableName
 }
 
-export async function generateLabelsPDF(opts: { items: EquipmentItem[] } & LabelsOptions) {
+// ======================== STICKERS 100×70 мм ========================
+export async function generateLabelsPDF(opts: {
+  items: EquipmentItem[]
+  title?: string
+  qrField?: 'serial_number' | 'internal_id' | 'id' | 'composed'
+  tableName?: EquipmentTableName
+}) {
   const items = opts.items || []
-  const cols  = Math.max(1, opts.cols ?? 3)
-  const rows  = Math.max(1, opts.rows ?? 8)
-  const qrMode = opts.qrField ?? 'composed'
 
-  const doc = new jsPDF({ unit: 'pt', format: 'a4' })
+  // КЛЮЧЕВОЕ: landscape + формат [70, 100] (ширина=100, высота=70 после поворота)
+  const doc = new jsPDF({ unit: 'mm', format: [70, 100], orientation: 'landscape' })
   await ensureFonts(doc)
+  doc.setFont(activeFamily, 'normal')
+  doc.setProperties({
+    title: opts.title ? `Этикетки 100x70 — ${opts.title}` : 'Этикетки 100x70'
+  })
 
-  const pageW = getPageSize(doc).width
-  const pageH = getPageSize(doc).height
-  const marginX = 36
-  const marginY = 36
-  const gap = 8
+  const pad = 4
+  const qrSize = 32
+  const mmToPx = (mm: number) => Math.max(80, Math.round((mm / 25.4) * 203))
 
-  const cellW = (pageW - marginX * 2 - gap * (cols - 1)) / cols
-  const cellH = (pageH - marginY * 2 - gap * (rows - 1)) / rows
+  for (let i = 0; i < items.length; i++) {
+    if (i > 0) doc.addPage([70, 100], 'landscape') // важна ориентация
 
-  const pad = 10
-  const qrSize = Math.min(90, Math.min(cellW, cellH) * 0.45)
+    const it = items[i]
+    const textMaxW = 100 - pad * 2 - qrSize - 4
 
-  const buildQR = (it: EquipmentItem) => {
-    switch (qrMode) {
-      case 'serial_number': return it.serial_number
-      case 'internal_id':   return it.internal_id
-      case 'id':            return String(it.id)
-      default:              return `${opts.tableName ?? ''}:${it.id}:${it.serial_number}`
+    doc.setFontSize(12)
+    doc.text(opts.title || 'Оборудование', pad, 10, { maxWidth: textMaxW })
+
+    doc.setFontSize(11)
+    const l1 = doc.splitTextToSize(`Модель: ${it.model ?? ''}`, textMaxW)
+    const l2 = doc.splitTextToSize(`Внутр. ID: ${it.internal_id ?? ''}`, textMaxW)
+    const l3 = doc.splitTextToSize(`SN: ${it.serial_number ?? ''}`, textMaxW)
+
+    let y = 16
+    doc.text(l1 as any, pad, y); y += (Array.isArray(l1) ? l1.length : 1) * 5
+    doc.text(l2 as any, pad, y); y += (Array.isArray(l2) ? l2.length : 1) * 5
+    doc.text(l3 as any, pad, y)
+
+    const sn = (it.serial_number ?? '').trim()
+    if (sn) {
+      const qrData = await QRCode.toDataURL(sn, {
+        errorCorrectionLevel: 'M',
+        margin: 0,
+        width: mmToPx(qrSize),
+        color: { dark: '#000000', light: '#FFFFFF' }
+      })
+      try {
+        const fmt = detectImageFormat(qrData)
+        const x = 100 - pad - qrSize
+        const yq = (70 - qrSize) / 2
+        doc.addImage(qrData, fmt, x, yq, qrSize, qrSize, undefined, 'FAST')
+      } catch {}
     }
   }
 
-  const qrCache = new Map<number, string>()
-  async function getQR(it: EquipmentItem) {
-    if (qrCache.has(it.id)) return qrCache.get(it.id)!
-    const dataUrl = await QRCode.toDataURL(buildQR(it), { errorCorrectionLevel: 'M', margin: 0, scale: 4 })
-    qrCache.set(it.id, dataUrl)
-    return dataUrl
-  }
-
-  doc.setProperties({ title: opts.title ? `Этикетки — ${opts.title}` : 'Этикетки оборудования' })
-
-  for (let i = 0; i < items.length; i++) {
-    const idxInPage = i % (cols * rows)
-    const r = Math.floor(idxInPage / cols)
-    const c = idxInPage % cols
-
-    if (i > 0 && idxInPage === 0) doc.addPage()
-
-    const x = marginX + c * (cellW + gap)
-    const y = marginY + r * (cellH + gap)
-
-    doc.setDrawColor(210, 210, 210)
-    doc.roundedRect(x, y, cellW, cellH, 6, 6)
-
-    const contentX = x + pad
-    const contentY = y + pad
-    const textMaxW = cellW - pad * 2 - qrSize - 8
-
-    doc.setFont(activeFamily, 'bold'); doc.setFontSize(12)
-    const title = opts.title || 'Оборудование'
-    doc.text(title, contentX, contentY + 12, { maxWidth: textMaxW })
-
-    doc.setFont(activeFamily, 'normal'); doc.setFontSize(11)
-    const it = items[i]
-    const line1 = doc.splitTextToSize(`Модель: ${it.model}`, textMaxW)
-    const line2 = doc.splitTextToSize(`Внутр. ID: ${it.internal_id}`, textMaxW)
-    const line3 = doc.splitTextToSize(`SN: ${it.serial_number}`, textMaxW)
-
-    let ty = contentY + 20
-    doc.text(line1 as any, contentX, ty); ty += (Array.isArray(line1) ? line1.length : 1) * 14
-    doc.setFont(activeFamily, 'bold')
-    doc.text(line2 as any, contentX, ty); ty += (Array.isArray(line2) ? line2.length : 1) * 14
-    doc.setFont(activeFamily, 'normal')
-    doc.text(line3 as any, contentX, ty)
-
-    const qrData = await getQR(it)
-    try {
-      const fmt = detectImageFormat(qrData)
-      const qrX = x + cellW - pad - qrSize
-      const qrY = y + (cellH - qrSize) / 2
-      doc.addImage(qrData, fmt, qrX, qrY, qrSize, qrSize, undefined, 'FAST')
-    } catch {}
-  }
-
-  doc.save(`labels_${opts.title || 'equipment'}.pdf`)
+  doc.save(`labels_100x70_${opts.title || 'equipment'}.pdf`)
 }
 
 // ======================== THERMAL LABELS 50×50 ========================
@@ -294,91 +276,112 @@ export async function generateThermalLabelsPDF50(opts: {
   tableName?: EquipmentTableName
 }) {
   const items = opts.items || []
+  const type: EquipmentTableName = (opts.tableName || 'tsd') as EquipmentTableName
 
-  // Страница ровно 50×50 мм (под термоленту 50x50)
   const doc = new jsPDF({ unit: 'mm', format: [50, 50], orientation: 'portrait' })
   await ensureFonts(doc)
+  doc.setFont(activeFamily, 'normal')
   doc.setProperties({
     title: opts.title ? `Этикетки 50x50 — ${opts.title}` : 'Этикетки 50x50',
     author: 'Equipment Tracker',
     creator: 'Equipment Tracker'
   })
 
-  // Геометрия
   const pad = 3
-  const qrSizeMM = 13 // в 2 раза меньше предыдущих 26 мм
-  const dpi = 203
-  const qrWidthPx = Math.max(90, Math.round((qrSizeMM / 25.4) * dpi)) // ~104px при 203 dpi
-  const textMaxW = 50 - pad * 2 - qrSizeMM - 2 // ширина под текст слева от QR
-
-  // QR только из серийника (если пуст — fallback к ID/внутр. ID, чтобы не было пустых QR)
-  const buildQR = (it: EquipmentItem) => {
-    const serial = (it.serial_number ?? '').trim()
-    const internalId = (it.internal_id ?? '').trim()
-    const idStr = String(it.id ?? '')
-    return serial || internalId || idStr
-  }
+  const centerX = (mm: number) => 25 - mm / 2
+  const centerY = (mm: number) => 25 - mm / 2
 
   const qrCache = new Map<number, string>()
-  async function getQR(it: EquipmentItem) {
+  async function getSerialQR(it: EquipmentItem, px: number) {
+    const sn = (it.serial_number ?? '').trim()
+    if (!sn) return null
     if (qrCache.has(it.id)) return qrCache.get(it.id)!
-    const content = buildQR(it)
-    const dataUrl = await QRCode.toDataURL(content, {
+    const dataUrl = await QRCode.toDataURL(sn, {
       errorCorrectionLevel: 'M',
-      margin: 1,
-      width: qrWidthPx, // фиксируем пиксели под 203 dpi
+      margin: 0,
+      width: px,
       color: { dark: '#000000', light: '#FFFFFF' }
     })
     qrCache.set(it.id, dataUrl)
     return dataUrl
   }
 
-  for (let i = 0; i < items.length; i++) {
-    if (i > 0) doc.addPage([50, 50], 'portrait')
+  const mmToPx = (mm: number) => Math.max(60, Math.round((mm / 25.4) * 203))
 
-    const it = items[i]
-    const x = pad, y = pad
-
-    // Заголовок — крупнее
-    doc.setFont(activeFamily, 'bold')
-    doc.setFontSize(15) // было 7.5
-    const title = opts.title || 'Оборудование'
-    doc.text(title, x, y + 6, { maxWidth: textMaxW })
-
-    // Основной текст — крупнее и читаемее
-    // Модель (обычный), Внутр. ID (жирный), Серийник (обычный)
-    let ty = y + 14
-    doc.setFont(activeFamily, 'normal')
-    doc.setFontSize(12) // было 6.2
-    const ln1 = doc.splitTextToSize(`Модель: ${it.model}`, textMaxW)
-    doc.text(ln1 as any, x, ty); ty += (Array.isArray(ln1) ? ln1.length : 1) * 4.3
-
-    doc.setFont(activeFamily, 'bold')
-    doc.setFontSize(12)
-    const ln2 = doc.splitTextToSize(`ID: ${it.internal_id}`, textMaxW)
-    doc.text(ln2 as any, x, ty); ty += (Array.isArray(ln2) ? ln2.length : 1) * 4.5
-
+  async function drawTablet(it: EquipmentItem) {
+    const qrSize = 20
+    const qr = await getSerialQR(it, mmToPx(qrSize))
+    if (qr) {
+      const fmt = detectImageFormat(qr)
+      doc.addImage(qr, fmt, pad, pad, qrSize, qrSize, undefined, 'FAST')
+    }
     doc.setFont(activeFamily, 'normal')
     doc.setFontSize(12)
-    const ln3 = doc.splitTextToSize(`SN: ${it.serial_number}`, textMaxW)
-    doc.text(ln3 as any, x, ty)
+    const x = pad + qrSize + 2
+    const maxW = 50 - x - pad
+    const id = (it.internal_id ?? '').trim() || '—'
+    doc.text(id, x, pad + 8, { maxWidth: maxW })
+  }
 
-    // QR — в правом верхнем углу
-    const qrData = await getQR(it)
-    try {
-      const fmt = detectImageFormat(qrData)
-      const qrX = 50 - pad - qrSizeMM
-      const qrY = pad
-      doc.addImage(qrData, fmt, qrX, qrY, qrSizeMM, qrSizeMM, undefined, 'FAST')
-    } catch {
-      // если по какой-то причине QR не отрисовался — выведем текстовое значение серийника в угол
-      doc.setFont(activeFamily, 'bold')
-      doc.setFontSize(8)
-      doc.text(buildQR(it), 50 - pad - qrSizeMM, pad + 6, { maxWidth: qrSizeMM })
+  async function drawTsd(it: EquipmentItem) {
+    const qrSize = 18
+    const qr = await getSerialQR(it, mmToPx(qrSize))
+    if (qr) {
+      const fmt = detectImageFormat(qr)
+      doc.addImage(qr, fmt, 50 - pad - qrSize, pad, qrSize, qrSize, undefined, 'FAST')
+    }
+    const maxW = 50 - pad * 2 - (qr ? (qrSize + 2) : 0)
+    doc.setFont(activeFamily, 'normal')
+    doc.setFontSize(11)
+    const title = (it.model ?? '').trim() || 'ТСД'
+    doc.text(title, pad, pad + 6, { maxWidth: maxW })
+    doc.setFontSize(12)
+    const id = (it.internal_id ?? '').trim() || '—'
+    doc.text(id, pad, pad + 14, { maxWidth: maxW })
+  }
+
+  async function drawFinger(it: EquipmentItem) {
+    const side = Math.min(31, 50 * Math.sqrt(0.4))
+    const qr = await getSerialQR(it, mmToPx(side))
+    if (qr) {
+      const fmt = detectImageFormat(qr)
+      const qx = centerX(side)
+      const qy = centerY(side) - 4
+      doc.addImage(qr, fmt, qx, qy, side, side, undefined, 'FAST')
+    }
+    const id = (it.internal_id ?? '').trim()
+    if (id) {
+      doc.setFont(activeFamily, 'normal')
+      doc.setFontSize(10)
+      doc.text(id, 25, 46, { align: 'center', maxWidth: 44 })
     }
   }
 
-  doc.save(`labels_50x50_${opts.title || 'equipment'}.pdf`)
+  async function drawDesktop(it: EquipmentItem) {
+    const id = (it.internal_id ?? '').trim() || '—'
+    doc.setFont(activeFamily, 'normal')
+    doc.setFontSize(16)
+    doc.text(id, 25, 27, { align: 'center', maxWidth: 46 })
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    if (i > 0) doc.addPage([50, 50], 'portrait')
+    const it = items[i]
+    doc.setDrawColor(230, 230, 230)
+    doc.rect(0.5, 0.5, 49, 49)
+
+    if (type === 'tablets') {
+      await drawTablet(it)
+    } else if (type === 'tsd') {
+      await drawTsd(it)
+    } else if (type === 'finger_scanners') {
+      await drawFinger(it)
+    } else if (type === 'desktop_scanners') {
+      await drawDesktop(it)
+    } else {
+      await drawTablet(it)
+    }
+  }
+
+  doc.save(`labels_50x50_${opts.title || type}.pdf`)
 }
-
-
