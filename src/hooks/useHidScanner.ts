@@ -135,5 +135,5 @@ export function useHidScanner(opts: Options) {
       document.removeEventListener('paste', pasteHandler, true)
       reset()
     }
-  }, [enabled, accept, interKeyTimeoutMs, suffixKeys, reset])
+  }, [enabled, accept, interKeyTimeoutMs, minLength, suffixKeys, reset])
 }

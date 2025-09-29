@@ -200,10 +200,11 @@ export async function generateShipmentPDF(opts: {
   doc.save(`shipment_${opts.shipmentNumber}.pdf`)
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 type LabelsOptions = {
   title?: string
-  cols?: number // для совместимости, не используется
-  rows?: number // для совместимости, не используется
+  cols?: number
+  rows?: number
   qrField?: 'serial_number' | 'internal_id' | 'id' | 'composed'
   tableName?: EquipmentTableName
 }

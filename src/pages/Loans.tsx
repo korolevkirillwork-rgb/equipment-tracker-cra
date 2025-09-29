@@ -488,9 +488,6 @@ const findActiveBySerial = React.useCallback(
     }
   }
 
-  const focusSinkSafe = React.useCallback(() => {
-    requestAnimationFrame(() => requestAnimationFrame(() => devSinkRef.current?.focus()))
-  }, [])
 
   // Ручная сдача (иконка)
   const [returnItem, setReturnItem] = React.useState<{ table: TType; id: number } | null>(null)

@@ -60,11 +60,17 @@ export default function ImportCsvDialog({ open, onClose, onImported, table: tabl
 
   const inputRef = React.useRef<HTMLInputElement | null>(null)
 
-  const lastBatch = React.useMemo<LastBatch | null>(() => {
-    try { return JSON.parse(localStorage.getItem(LAST_BATCH_KEY) || 'null') } catch { return null }
+  // lastBatch: читаем из localStorage при каждом открытии диалога
+  const [lastBatch, setLastBatch] = React.useState<LastBatch | null>(null)
+  React.useEffect(() => {
+    if (!open) return
+    try {
+      setLastBatch(JSON.parse(localStorage.getItem(LAST_BATCH_KEY) || 'null'))
+    } catch {
+      setLastBatch(null)
+    }
   }, [open])
 
-  const hasErrors = rows.some(r => r.__errors.length > 0)
   const validRows = rows.filter(r => r.__errors.length === 0)
 
   const resetState = () => {
@@ -208,6 +214,7 @@ export default function ImportCsvDialog({ open, onClose, onImported, table: tabl
 
       const batch: LastBatch = { table, ids: insertedIds, ts: Date.now() }
       localStorage.setItem(LAST_BATCH_KEY, JSON.stringify(batch))
+      setLastBatch(batch)
 
       setMessage({ type: 'success', text: `Импортировано: ${insertedIds.length} из ${validRows.length}` })
       if (onImported) onImported()
@@ -237,6 +244,7 @@ export default function ImportCsvDialog({ open, onClose, onImported, table: tabl
         }
       }
       localStorage.removeItem(LAST_BATCH_KEY)
+      setLastBatch(null)
       setMessage({ type: 'success', text: 'Откат выполнен' })
       if (onImported) onImported()
     } catch (e: any) {
